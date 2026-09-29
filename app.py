@@ -23,23 +23,31 @@ with tab1:
     if uploaded_file is not None:
         df_crm = pd.read_csv(uploaded_file)
         st.success("✅ CSV 上傳成功！")
+        st.write("📋 CSV 內所有欄位名稱：")
+        st.write(df_crm.columns.tolist()) # 印出所有欄位，方便確認
+
         st.dataframe(df_crm, use_container_width=True)
 
         st.subheader("2. 輸入要比對的公司名稱")
         target_name = st.text_input("公司名稱：", placeholder="例如：台北防偽科技股份有限公司")
 
         if target_name:
-            company_list = df_crm["公司名稱"].tolist()
-            match_result = process.extractOne(target_name, company_list, score_cutoff=threshold)
-
-            st.subheader("3. 比對結果")
-            if match_result:
-                match_name, score = match_result
-                st.write(f"匹配公司：**{match_name}**")
-                st.write(f"匹配分數：{score}")
-                st.dataframe(df_crm[df_crm["公司名稱"] == match_name], use_container_width=True)
+            # 自動找對應欄位，這裡假設你的欄位是「公司名稱」，如果不是，看上面印出來的欄位名去改
+            col_name = "公司名稱"
+            if col_name not in df_crm.columns:
+                st.error(f"❌ 找不到欄位：{col_name}，請檢查上面列出的CSV欄位！")
             else:
-                st.warning("❌ 找不到符合閾值的公司")
+                company_list = df_crm[col_name].tolist()
+                match_result = process.extractOne(target_name, company_list, score_cutoff=threshold)
+
+                st.subheader("3. 比對結果")
+                if match_result:
+                    match_name, score = match_result
+                    st.write(f"匹配公司：**{match_name}**")
+                    st.write(f"匹配分數：{score}")
+                    st.dataframe(df_crm[df_crm[col_name] == match_name], use_container_width=True)
+                else:
+                    st.warning("❌ 找不到符合閾值的公司")
 
 with tab2:
     st.subheader("產業搜尋（模擬模式）")
