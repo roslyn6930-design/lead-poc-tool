@@ -4,7 +4,7 @@ from fuzzywuzzy import process
 import requests
 import json
 
-st.set_page_config(page_title="商機挖掘工具 V2.0", layout="wide")
+st.set_page_config(page_title="商機挖掘工具 V2.0‑fix", layout="wide")
 st.title("🛡️ 商機挖掘工具 V2.0｜客戶檢查 + 批量商機挖掘")
 
 # ========= Secrets讀取 =========
@@ -78,6 +78,7 @@ def llm_summarize_single(company_name, search_data):
     raw = data["choices"][0]["message"]["content"].replace("```json","").replace("```","").strip()
     return json.loads(raw)
 
+
 def llm_parse_batch(raw_search_result, industry_keyword, max_count):
     prompt = f"""
 你是防偽銷售助理，依據網路搜尋，挖掘【{industry_keyword}】產業有假貨、竄貨、價格亂象的企業。
@@ -91,11 +92,56 @@ angle：繁體中文，80字以內，業務拜訪切入談資
 """
     headers = {"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
     payload = {"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":prompt}],"temperature":0.3}
-    r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=60)
-    r.raise_for_status()
-    data = r.json()
-    raw = data["choices"][0]["message"]["content"].replace("```json","").replace("```","").strip()
-    return json.loads(raw)
+    try:
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=60)
+        if r.status_code >= 400:
+            return [{"error":f"Groq API回傳錯誤 status={r.status_code}"}]
+        data = r.json()
+        raw = data["choices"][0]["message"]["content"].replace("```json","").replace("```","").strip()
+        return json.loads(raw)
+    except Exception as e:
+        return [{"error":f"LLM解析失敗：{str(e)}"}]
+
+
+def run_batch(industry_keyword, max_items):
+    """批量挖掘主流程"""
+    if not HAS_API:
+        return [{"error":"API金鑰未設定，無法執行批量挖掘"}]
+    if st.session_state.df_crm is None:
+        return [{"error":"請先上傳CRM CSV"}]
+
+    batch_query = f"{industry_keyword} 假貨 OR 竄貨 OR 亂價 OR 消費者投訴 OR 品牌新聞"
+    payload = {"api_key":TAVILY_API_KEY,"query":batch_query,"search_depth":"basic","max_results":12,"topic":"general"}
+    try:
+        resp = requests.post("https://api.tavily.com/search", json=payload, timeout=40)
+        if resp.status_code >=400:
+            return [{"error":f"Tavily搜尋API錯誤 status={resp.status_code}"}]
+        raw_search = resp.json()
+    except Exception as e:
+        return [{"error":f"Tavily網路搜尋失敗：{str(e)}"}]
+
+    parsed_list = llm_parse_batch(raw_search, industry_keyword, max_items)
+    if len(parsed_list)>=1 and "error" in parsed_list[0]:
+        return parsed_list
+
+    output = []
+    for item in parsed_list:
+        c_name = item.get("company_name","").strip()
+        if not c_name:
+            continue
+        if is_in_blacklist(c_name, st.session_state.df_blacklist):
+            continue
+        crm_res = crm_fuzzy_check(c_name, st.session_state.df_crm)
+        if crm_res["status"] == "existing_customer":
+            continue
+        output.append({
+            "公司名稱":c_name,
+            "CRM狀態":crm_res["status"],
+            "商機等級":item.get("business_risk","C"),
+            "切入角度":item.get("angle",""),
+        })
+    return output
+
 
 def run_single_query():
     """單筆查詢 enter觸發"""
@@ -112,37 +158,6 @@ def run_single_query():
     res = crm_fuzzy_check(company, st.session_state.df_crm, threshold=st.session_state.get("fuzzy_thres",80))
     st.session_state.result_data = res
     st.session_state.query_triggered = True
-
-def run_batch(industry_keyword, max_items):
-    """批量挖掘主流程"""
-    if not HAS_API:
-        return [{"error":"API金鑰未設定，無法執行批量挖掘"}]
-    if st.session_state.df_crm is None:
-        return [{"error":"請先上傳CRM CSV"}]
-    batch_query = f"{industry_keyword} 假貨 OR 竄貨 OR 亂價 OR 消費者投訴 OR 品牌新聞"
-    payload = {"api_key":TAVILY_API_KEY,"query":batch_query,"search_depth":"basic","max_results":12,"topic":"general"}
-    resp = requests.post("https://api.tavily.com/search", json=payload, timeout=40)
-    raw_search = resp.json()
-    parsed_list = llm_parse_batch(raw_search, industry_keyword, max_items)
-    output = []
-    for item in parsed_list:
-        c_name = item.get("company_name","").strip()
-        if not c_name:
-            continue
-        #黑名單過濾
-        if is_in_blacklist(c_name, st.session_state.df_blacklist):
-            continue
-        crm_res = crm_fuzzy_check(c_name, st.session_state.df_crm)
-        # 過濾掉真正有目標標籤的既有客戶
-        if crm_res["status"] == "existing_customer":
-            continue
-        output.append({
-            "公司名稱":c_name,
-            "CRM狀態":crm_res["status"],
-            "商機等級":item.get("business_risk","C"),
-            "切入角度":item.get("angle",""),
-        })
-    return output
 
 # ========= 側邊欄 =========
 with st.sidebar:
@@ -214,7 +229,7 @@ with tab_single:
                     st.markdown(f"- [{s['title']}]({s['url']})")
             except Exception as err:
                 st.error(f"網路查詢發生錯誤：{str(err)}")
-                st.caption("CRM比對不受影響。")
+                st.caption("CRM比對功能不受影響，可以繼續使用。")
 
 # ========= 頁籤2：批量挖掘 =========
 with tab_batch:
@@ -235,6 +250,8 @@ with tab_batch:
             with st.spinner("正在批量挖掘商機，請稍候(約2‑3分鐘)..."):
                 batch_list = run_batch(industry_input, max_output)
                 st.session_state.batch_result = batch_list
+                if len(batch_list)>=1 and "error" in batch_list[0]:
+                    st.error(batch_list[0]["error"])
 
     if len(st.session_state.batch_result) > 0:
         df_batch = pd.DataFrame(st.session_state.batch_result)
@@ -247,9 +264,10 @@ with tab_batch:
 
 st.divider()
 st.caption("""
-版本V2.0｜說明：
+版本V2.0‑fix｜說明：
 1. 單筆查詢輸入完公司名按Enter直接執行；
 2. CRM規則：股票客戶無目標標籤保留做開發候選，有目標標籤正式客戶會被過濾；
 3. 批量挖掘：自動搜尋公開痛點，排除正式客戶與黑名單，可下載CSV做陌生開發；
 ⚠️所有網路資訊僅供參考，務必人工複核；資料存放瀏覽器暫存，重整頁面會消失，記得匯出CSV保存。
+⚠️API錯誤時網頁不會直接崩潰，會顯示文字錯誤訊息。
 """)
