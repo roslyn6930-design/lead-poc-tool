@@ -4,8 +4,8 @@ from fuzzywuzzy import process
 import requests
 import json
 
-st.set_page_config(page_title="商機挖掘工具 V2.0‑fix", layout="wide")
-st.title("🛡️ 商機挖掘工具 V2.0｜客戶檢查 + 批量商機挖掘")
+st.set_page_config(page_title="商機挖掘工具 V2.1｜業務手動勾選跟進", layout="wide")
+st.title("🛡️ 商機挖掘工具 V2.1｜客戶檢查 + 批量商機挖掘")
 
 # ========= Secrets讀取 =========
 TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY", "")
@@ -24,6 +24,8 @@ def init_session():
         st.session_state.result_data = None
     if "batch_result" not in st.session_state:
         st.session_state.batch_result = []
+    if "batch_editable_df" not in st.session_state:
+        st.session_state.batch_editable_df = None
     if "error_msg" not in st.session_state:
         st.session_state.error_msg = None
 
@@ -135,9 +137,10 @@ def run_batch(industry_keyword, max_items):
         if crm_res["status"] == "existing_customer":
             continue
         output.append({
+            "業務勾選跟進": False,
             "公司名稱":c_name,
             "CRM狀態":crm_res["status"],
-            "商機等級":item.get("business_risk","C"),
+            "AI初判商機等級":item.get("business_risk","C"),
             "切入角度":item.get("angle",""),
         })
     return output
@@ -234,9 +237,15 @@ with tab_single:
 # ========= 頁籤2：批量挖掘 =========
 with tab_batch:
     st.subheader("設定挖掘條件，自動產生潛在開發名單")
+    st.info("💡 AI初判僅供參考，由業務手動勾選【業務勾選跟進】做為正式開發名單")
     col1, col2 = st.columns(2)
     with col1:
-        industry_input = st.text_input("目標產業關鍵字", value="保養品")
+        industry_options = ["保養品", "食品飲料", "生技醫療", "服飾精品", "3C電子", "機械設備", "其他(自行輸入)"]
+        selected_industry = st.selectbox("選擇目標產業", industry_options)
+        if selected_industry == "其他(自行輸入)":
+            industry_input = st.text_input("請輸入產業關鍵字")
+        else:
+            industry_input = selected_industry
     with col2:
         max_output = st.number_input("最大輸出筆數", min_value=3, max_value=15, value=8)
 
@@ -246,28 +255,68 @@ with tab_batch:
             st.error("需要設定Tavily+Groq API金鑰才能執行批量挖掘")
         elif st.session_state.df_crm is None:
             st.error("請先上傳CRM CSV")
+        elif not industry_input:
+            st.error("請選擇或輸入產業關鍵字！")
         else:
             with st.spinner("正在批量挖掘商機，請稍候(約2‑3分鐘)..."):
                 batch_list = run_batch(industry_input, max_output)
                 st.session_state.batch_result = batch_list
                 if len(batch_list)>=1 and "error" in batch_list[0]:
                     st.error(batch_list[0]["error"])
+                    st.session_state.batch_editable_df = None
+                else:
+                    st.session_state.batch_editable_df = pd.DataFrame(batch_list)
 
-    if len(st.session_state.batch_result) > 0:
-        df_batch = pd.DataFrame(st.session_state.batch_result)
-        st.subheader("挖掘結果(已過濾正式標籤客戶+黑名單)")
-        filter_level = st.multiselect("過濾商機等級",["A","B","C"],default=["A","B"])
-        df_filter = df_batch[df_batch["商機等級"].isin(filter_level)]
-        st.dataframe(df_filter, use_container_width=True)
-        csv_data = df_filter.to_csv(index=False, encoding="utf‑8‑sig")
-        st.download_button(label="📥 下載結果CSV(可匯入CRM)", data=csv_data, file_name="批量商機挖掘結果.csv", mime="text/csv")
+    if st.session_state.batch_editable_df is not None:
+        df_raw = st.session_state.batch_editable_df
+        filter_level = st.multiselect("過濾AI初判商機等級",["A","B","C"],default=["A","B"])
+        df_filter = df_raw[df_raw["AI初判商機等級"].isin(filter_level)].copy()
+
+        st.subheader("挖掘結果｜業務可手動勾選跟進欄位")
+        edited_df = st.data_editor(
+            df_filter,
+            column_config={
+                "業務勾選跟進": st.column_config.CheckboxColumn(
+                    "✅業務勾選跟進",
+                    help="業務人工判斷，勾選代表列入後續開發跟進名單",
+                    default=False
+                )
+            },
+            disabled=["公司名稱","CRM狀態","AI初判商機等級","切入角度"],
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.divider()
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            csv_all = edited_df.to_csv(index=False, encoding="utf‑8‑sig")
+            st.download_button(
+                label="📥下載全部顯示結果(含勾選狀態)",
+                data=csv_all,
+                file_name="批量商機_全部結果.csv",
+                mime="text/csv"
+            )
+        with col_dl2:
+            follow_df = edited_df[edited_df["業務勾選跟進"]==True]
+            csv_follow = follow_df.to_csv(index=False, encoding="utf‑8‑sig")
+            st.download_button(
+                label="📥僅下載【業務勾選跟進】名單",
+                data=csv_follow,
+                file_name="批量商機_業務確認跟進名單.csv",
+                mime="text/csv",
+                disabled=len(follow_df)==0
+            )
+        st.caption(f"已手動勾選跟進筆數：{len(follow_df)} 筆")
+
 
 st.divider()
 st.caption("""
-版本V2.0‑fix｜說明：
+版本V2.1｜AI初判 + 業務人工勾選
 1. 單筆查詢輸入完公司名按Enter直接執行；
 2. CRM規則：股票客戶無目標標籤保留做開發候選，有目標標籤正式客戶會被過濾；
-3. 批量挖掘：自動搜尋公開痛點，排除正式客戶與黑名單，可下載CSV做陌生開發；
+3. 批量挖掘：下拉選產業，AI給予A/B/C初判，**AI僅做參考，最終由業務勾選確認跟進名單**；
+4. 兩種下載模式：全部結果、僅下載業務勾選跟進名單；
 ⚠️所有網路資訊僅供參考，務必人工複核；資料存放瀏覽器暫存，重整頁面會消失，記得匯出CSV保存。
 ⚠️API錯誤時網頁不會直接崩潰，會顯示文字錯誤訊息。
 """)
