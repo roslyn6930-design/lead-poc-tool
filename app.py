@@ -7,10 +7,10 @@ import json
 st.set_page_config(page_title="商機挖掘工具｜客戶快速檢查版", layout="wide")
 st.title("🛡️ 商機挖掘工具｜輸入客戶快速檢查")
 
-# ========= 讀取 Secrets，容許金鑰不存在 =========
+# ========= 讀取 Secrets =========
 TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY", "")
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
-HAS_API = bool(TAVILY_API_KEY and GEMINI_API_KEY)
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
+HAS_API = bool(TAVILY_API_KEY and GROQ_API_KEY)
 
 # ========= Session 狀態 =========
 if "df_crm" not in st.session_state:
@@ -18,7 +18,7 @@ if "df_crm" not in st.session_state:
 
 # ========= 函數區 =========
 def crm_fuzzy_check(company_input, df_crm, threshold=80):
-    """CRM模糊比對，內部使用，不再回傳分數到畫面"""
+    """CRM模糊比對，內部使用，介面不顯示分數"""
     col = "公司名稱"
     name_list = df_crm[col].astype(str).tolist()
     res = process.extractOne(company_input, name_list, score_cutoff=threshold)
@@ -27,6 +27,7 @@ def crm_fuzzy_check(company_input, df_crm, threshold=80):
         row = df_crm[df_crm[col]==match_name].iloc[0].to_dict()
         return True, row
     return False, None
+
 
 def tavily_company_search(company_name):
     """針對單一公司搜尋假貨、竄貨、低價、社群新聞"""
@@ -42,8 +43,9 @@ def tavily_company_search(company_name):
     resp.raise_for_status()
     return resp.json()
 
+
 def llm_summarize_news(company_name, search_data):
-    """Gemini 摘要搜尋結果：風險判讀、重點摘要、來源清單"""
+    """Groq LLM摘要，取代Gemini，解決地區404攔截"""
     prompt = f"""
 你是品牌防偽銷售助理，針對【{company_name}】整理網路搜尋結果。
 輸出JSON物件，欄位：
@@ -51,20 +53,23 @@ def llm_summarize_news(company_name, search_data):
 - summary：繁體中文，150字以內，整理觀察重點，消費者抱怨、仿冒、竄貨、低價亂價等資訊
 - source_list：陣列，每筆包含title、url
 
-只輸出JSON，不要markdown、不要額外說明。
+只輸出JSON，不要markdown、不要額外說明文字。
 搜尋資料：
 {json.dumps(search_data, ensure_ascii=False)}
 """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents":[{"parts":[{"text":prompt}]}]}
-    r = requests.post(url, json=payload, timeout=40)
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type":"application/json"}
+    payload = {
+        "model":"llama-3.1-8b-instant",
+        "messages":[{"role":"user","content":prompt}],
+        "temperature":0.3
+    }
+    r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=40)
     r.raise_for_status()
     data = r.json()
-    if "error" in data or "candidates" not in data or len(data["candidates"])==0:
-        raise Exception("LLM沒有回傳有效內容")
-    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+    raw_text = data["choices"][0]["message"]["content"]
     raw_text = raw_text.replace("```json","").replace("```","").strip()
     return json.loads(raw_text)
+
 
 # ========= UI介面 =========
 with st.sidebar:
@@ -83,6 +88,7 @@ with st.sidebar:
         except Exception as e:
             st.error(f"讀取CSV失敗：{e}")
 
+
 st.subheader("2.輸入欲開發檢查的客戶公司名")
 input_company = st.text_input("公司名稱", placeholder="例如：晶亮美妝生技股份有限公司")
 run_btn = st.button("🔎 開始檢查（CRM比對 + 網路輔助查詢）")
@@ -97,7 +103,7 @@ if run_btn:
 
     tab_crm, tab_web = st.tabs(["📋 CRM客戶比對結果","🌐 網路輔助資訊(假貨/竄貨/新聞)"])
 
-    # -------- CRM比對（畫面移除匹配分數） --------
+    # -------- CRM比對 --------
     with tab_crm:
         exist, info_row = crm_fuzzy_check(input_company, st.session_state.df_crm, threshold=fuzzy_thres)
         if exist:
@@ -109,7 +115,7 @@ if run_btn:
     # -------- 網路查詢（有金鑰才執行） --------
     with tab_web:
         if not HAS_API:
-            st.info("⚠️ Tavily / Gemini API金鑰尚未設定，跳過網路查詢；請至Streamlit Secrets填入金鑰")
+            st.info("⚠️ Tavily / Groq API金鑰尚未設定，跳過網路查詢；請至Streamlit Secrets填入金鑰")
         else:
             try:
                 with st.spinner("正在上網搜尋假貨、竄貨、社群與新聞資訊..."):
@@ -125,7 +131,8 @@ if run_btn:
 
             except Exception as err:
                 st.error(f"網路查詢發生錯誤：{str(err)}")
-                st.caption("可能原因：金鑰錯誤、配額用完、地區攔截、網路連線問題；CRM比對功能不受影響。")
+                st.caption("可能原因：金鑰錯誤、配額用完、網路連線問題；CRM比對功能不受影響。")
+
 
 st.divider()
 st.caption("說明：網路資訊僅供業務參考，請務必人工核實內容真實性。\n⚠️ 提醒：本工具CRM資料存於瀏覽器暫存，重新整理頁面資料會消失，每次使用請重新上傳最新CRM CSV。")
