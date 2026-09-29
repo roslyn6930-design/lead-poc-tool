@@ -16,17 +16,41 @@ HAS_API = bool(TAVILY_API_KEY and GROQ_API_KEY)
 if "df_crm" not in st.session_state:
     st.session_state.df_crm = None
 
-# ========= 函數區 =========
+# ========= 函數區｜更新後的模糊比對邏輯 =========
 def crm_fuzzy_check(company_input, df_crm, threshold=80):
-    """CRM模糊比對，內部使用，介面不顯示分數"""
-    col = "公司名稱"
-    name_list = df_crm[col].astype(str).tolist()
+    """
+    回傳狀態:
+    status:
+        existing_customer: CRM匹配，且具備目標標籤 → 既有客戶，不開發
+        crm_stock_no_tag: CRM匹配，股票客戶但沒有目標標籤 → 可開發潛在名單
+        new_prospect: CRM完全沒有這筆 → 全新潛在客戶
+    match_row: dict 匹配到的那一列，沒有則None
+    """
+    col_name = "公司名稱"
+    name_list = df_crm[col_name].astype(str).tolist()
     res = process.extractOne(company_input, name_list, score_cutoff=threshold)
-    if res:
-        match_name, _ = res
-        row = df_crm[df_crm[col]==match_name].iloc[0].to_dict()
-        return True, row
-    return False, None
+
+    if not res:
+        return {"status":"new_prospect", "match_row":None}
+
+    match_name, _ = res
+    row = df_crm[df_crm[col_name]==match_name].iloc[0].to_dict()
+
+    # 讀取欄位，處理空值
+    cust_type = str(row.get("客戶類型","")).strip()
+    target_tag = str(row.get("目標標籤","")).strip()
+
+    # 規則判斷
+    if target_tag and target_tag != "nan":
+        # 有目標標籤 → 正式客戶
+        return {"status":"existing_customer", "match_row":row}
+    else:
+        if cust_type == "股票客戶":
+            # 股票客戶，但沒有目標標籤 → 可開發候選
+            return {"status":"crm_stock_no_tag", "match_row":row}
+        else:
+            # 其他無標籤客戶
+            return {"status":"crm_stock_no_tag", "match_row":row}
 
 
 def tavily_company_search(company_name):
@@ -45,12 +69,13 @@ def tavily_company_search(company_name):
 
 
 def llm_summarize_news(company_name, search_data):
-    """Groq LLM摘要，取代Gemini，解決地區404攔截"""
+    """Groq LLM摘要"""
     prompt = f"""
 你是品牌防偽銷售助理，針對【{company_name}】整理網路搜尋結果。
 輸出JSON物件，欄位：
-- risk_level：高 / 中 / 低 （高：有假貨/竄貨/亂價公開事件；中：有通路風險但無明確事件；低：無相關負面資訊）
-- summary：繁體中文，150字以內，整理觀察重點，消費者抱怨、仿冒、竄貨、低價亂價等資訊
+- risk_level：高 / 中 / 低
+- has_potential_demand：true / false，是否出現防偽、竄貨、假貨相關潛在需求跡象
+- summary：繁體中文，150字以內，整理觀察重點
 - source_list：陣列，每筆包含title、url
 
 只輸出JSON，不要markdown、不要額外說明文字。
@@ -74,7 +99,8 @@ def llm_summarize_news(company_name, search_data):
 # ========= UI介面 =========
 with st.sidebar:
     st.header("1.上傳CRM客戶CSV")
-    upload_file = st.file_uploader("必須有欄位：公司名稱", type="csv")
+    st.info("CSV必須欄位：公司名稱、客戶類型、目標標籤")
+    upload_file = st.file_uploader("上傳CRM csv", type="csv")
     fuzzy_thres = st.slider("模糊比對門檻(內部邏輯)", min_value=60, max_value=95, value=80)
     st.divider()
     st.info(f"網路查詢功能：{'✅已啟用' if HAS_API else '❌未設定API金鑰(僅CRM比對可用)'}")
@@ -103,14 +129,20 @@ if run_btn:
 
     tab_crm, tab_web = st.tabs(["📋 CRM客戶比對結果","🌐 網路輔助資訊(假貨/竄貨/新聞)"])
 
-    # -------- CRM比對 --------
+    # -------- CRM比對更新後邏輯 --------
     with tab_crm:
-        exist, info_row = crm_fuzzy_check(input_company, st.session_state.df_crm, threshold=fuzzy_thres)
-        if exist:
-            st.success(f"✅ 該客戶已存在CRM系統內")
+        result = crm_fuzzy_check(input_company, st.session_state.df_crm, threshold=fuzzy_thres)
+        status = result["status"]
+        info_row = result["match_row"]
+
+        if status == "existing_customer":
+            st.success("✅ 狀態：【既有目標客戶】已有目標標籤，不建議做新開發")
             st.dataframe(pd.DataFrame([info_row]), use_container_width=True)
-        else:
-            st.info(f"🆕 CRM查無此客戶，視為潛在新開發客戶")
+        elif status == "crm_stock_no_tag":
+            st.warning("⚠️ 狀態：【CRM有紀錄｜股票客戶，尚未有目標標籤】可納入開發候選，建議參考網路是否有潛在需求")
+            st.dataframe(pd.DataFrame([info_row]), use_container_width=True)
+        elif status == "new_prospect":
+            st.info("🆕 狀態：【完全不在CRM】全新潛在開發名單")
 
     # -------- 網路查詢（有金鑰才執行） --------
     with tab_web:
@@ -120,10 +152,12 @@ if run_btn:
             try:
                 with st.spinner("正在上網搜尋假貨、竄貨、社群與新聞資訊..."):
                     search_result = tavily_company_search(input_company)
-                with st.spinner("LLM整理風險摘要..."):
+                with st.spinner("LLM整理風險摘要，判斷是否具備潛在需求..."):
                     news_json = llm_summarize_news(input_company, search_result)
 
                 st.markdown(f"**風險等級：{news_json['risk_level']}**")
+                demand_text = "✅ 判斷：觀察到潛在需求跡象，適合拜訪開發" if news_json["has_potential_demand"] else "ℹ️ 判斷：未觀察到明顯潛在需求跡象"
+                st.markdown(f"**潛在需求判斷：{demand_text}**")
                 st.markdown(f"**摘要：** {news_json['summary']}")
                 st.subheader("📎 資訊來源清單")
                 for s in news_json["source_list"]:
@@ -135,4 +169,7 @@ if run_btn:
 
 
 st.divider()
-st.caption("說明：網路資訊僅供業務參考，請務必人工核實內容真實性。\n⚠️ 提醒：本工具CRM資料存於瀏覽器暫存，重新整理頁面資料會消失，每次使用請重新上傳最新CRM CSV。")
+st.caption("""說明：
+1. CRM比對規則：股票客戶但無目標標籤 → 視為可開發候選；有目標標籤才視為既有客戶。
+2. 潛在需求判斷依賴網路搜尋結果；API未啟用時僅做CRM狀態分類。
+⚠️ 提醒：本工具CRM資料存於瀏覽器暫存，重新整理頁面資料會消失，每次使用請重新上傳最新CRM CSV。""")
