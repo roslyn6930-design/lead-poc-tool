@@ -4,8 +4,8 @@ from fuzzywuzzy import process
 import requests
 import json
 
-st.set_page_config(page_title="商機挖掘工具 V2.1｜業務手動勾選跟進", layout="wide")
-st.title("🛡️ 商機挖掘工具 V2.1｜客戶檢查 + 批量商機挖掘")
+st.set_page_config(page_title="商機挖掘工具 V2.2｜修復Groq 404", layout="wide")
+st.title("🛡️ 商機挖掘工具 V2.2｜客戶檢查 + 批量商機挖掘")
 
 # ========= Secrets讀取 =========
 TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY", "")
@@ -73,7 +73,8 @@ def llm_summarize_single(company_name, search_data):
 搜尋資料：{json.dumps(search_data, ensure_ascii=False)}
 """
     headers = {"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
-    payload = {"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":prompt}],"temperature":0.3}
+    # 修正：使用Groq有效模型 llama3‑8b‑8192
+    payload = {"model":"llama3-8b-8192","messages":[{"role":"user","content":prompt}],"temperature":0.3}
     r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=40)
     r.raise_for_status()
     data = r.json()
@@ -93,7 +94,8 @@ angle：繁體中文，80字以內，業務拜訪切入談資
 搜尋資料：{json.dumps(raw_search_result, ensure_ascii=False)}
 """
     headers = {"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
-    payload = {"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":prompt}],"temperature":0.3}
+    # 修正：使用Groq有效模型 llama3‑8b‑8192
+    payload = {"model":"llama3-8b-8192","messages":[{"role":"user","content":prompt}],"temperature":0.3}
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=60)
         if r.status_code >= 400:
@@ -312,11 +314,10 @@ with tab_batch:
 
 st.divider()
 st.caption("""
-版本V2.1｜AI初判 + 業務人工勾選
+版本V2.2｜修復Groq 404；AI初判 + 業務人工勾選
 1. 單筆查詢輸入完公司名按Enter直接執行；
 2. CRM規則：股票客戶無目標標籤保留做開發候選，有目標標籤正式客戶會被過濾；
 3. 批量挖掘：下拉選產業，AI給予A/B/C初判，**AI僅做參考，最終由業務勾選確認跟進名單**；
 4. 兩種下載模式：全部結果、僅下載業務勾選跟進名單；
 ⚠️所有網路資訊僅供參考，務必人工複核；資料存放瀏覽器暫存，重整頁面會消失，記得匯出CSV保存。
-⚠️API錯誤時網頁不會直接崩潰，會顯示文字錯誤訊息。
 """)
