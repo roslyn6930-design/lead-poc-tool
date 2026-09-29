@@ -3,9 +3,10 @@ import pandas as pd
 from fuzzywuzzy import process
 import requests
 import json
+import re
 
-st.set_page_config(page_title="商機挖掘工具 V2.2｜修復Groq 404", layout="wide")
-st.title("🛡️ 商機挖掘工具 V2.2｜客戶檢查 + 批量商機挖掘")
+st.set_page_config(page_title="商機挖掘工具 V2.3｜修復Groq400", layout="wide")
+st.title("🛡️ 商機挖掘工具 V2.3｜客戶檢查 + 批量商機挖掘")
 
 # ========= Secrets讀取 =========
 TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY", "")
@@ -55,67 +56,63 @@ def is_in_blacklist(company_name, df_blacklist):
     return match is not None
 
 def tavily_company_search(company_name):
-    query = f'"{company_name}" 假貨 OR 仿冒 OR 竄貨 OR 亂價 OR 低價 OR 消費者抱怨 OR Dcard OR PTT OR 新聞'
-    payload = {"api_key":TAVILY_API_KEY,"query":query,"search_depth":"basic","max_results":6,"topic":"general"}
+    query = f'"{company_name}" 假貨 OR 仿冒 OR 竄貨 OR 亂價 OR 低價 OR 消費者抱怨'
+    payload = {"api_key":TAVILY_API_KEY,"query":query,"search_depth":"basic","max_results":4,"topic":"general"}
     resp = requests.post("https://api.tavily.com/search", json=payload, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
+def clean_json_text(text):
+    """清理LLM輸出，移除markdown標記、特殊符號，解決400/解析失敗"""
+    text = re.sub(r"```(json)?", "", text)
+    text = text.replace("\n", "").strip()
+    return text
+
 def llm_summarize_single(company_name, search_data):
     prompt = f"""
 你是品牌防偽銷售助理，針對【{company_name}】整理網路搜尋結果。
-輸出JSON物件，欄位：
-- risk_level：高 / 中 / 低
-- has_potential_demand：true / false
-- summary：繁體中文，150字以內，整理重點，仿冒、竄貨、低價亂價、消費者抱怨
-- source_list：陣列，每筆包含title、url
-只輸出JSON，不要markdown，不要額外文字。
-搜尋資料：{json.dumps(search_data, ensure_ascii=False)}
+只回傳純JSON，不要任何其他文字。
+欄位：risk_level(高/中/低), has_potential_demand(boolean), summary(繁體150字內), source_list[title,url]
+搜尋：{json.dumps(search_data, ensure_ascii=False)[:2200]}
 """
     headers = {"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
-    # 修正：使用Groq有效模型 llama3‑8b‑8192
-    payload = {"model":"llama3-8b-8192","messages":[{"role":"user","content":prompt}],"temperature":0.3}
+    payload = {"model":"llama3-70b-8192","messages":[{"role":"user","content":prompt}],"temperature":0.2}
     r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=40)
     r.raise_for_status()
     data = r.json()
-    raw = data["choices"][0]["message"]["content"].replace("```json","").replace("```","").strip()
+    raw = clean_json_text(data["choices"][0]["message"]["content"])
     return json.loads(raw)
 
 
 def llm_parse_batch(raw_search_result, industry_keyword, max_count):
     prompt = f"""
-你是防偽銷售助理，依據網路搜尋，挖掘【{industry_keyword}】產業有假貨、竄貨、價格亂象的企業。
-最多輸出{max_count}筆。
-JSON陣列每一筆欄位：
-company_name：公司完整名稱
-business_risk：A / B / C，A=有明顯假貨竄貨事件；B=通路多有潛在風險；C=幾乎無風險
-angle：繁體中文，80字以內，業務拜訪切入談資
-只輸出JSON陣列，不要markdown，不要解釋。
-搜尋資料：{json.dumps(raw_search_result, ensure_ascii=False)}
+你是防偽銷售助理，挖掘【{industry_keyword}】產業有假貨、竄貨、價格亂象的企業。
+最多{max_count}筆，只輸出JSON陣列，不要解釋、不要markdown。
+每筆欄位：company_name(完整公司名), business_risk(A/B/C), angle(繁體80字內業務切入談資)
+A=明顯假貨竄貨事件；B=通路多有潛在風險；C=幾乎無風險。
+搜尋資料：{json.dumps(raw_search_result, ensure_ascii=False)[:2500]}
 """
     headers = {"Authorization":f"Bearer {GROQ_API_KEY}","Content-Type":"application/json"}
-    # 修正：使用Groq有效模型 llama3‑8b‑8192
-    payload = {"model":"llama3-8b-8192","messages":[{"role":"user","content":prompt}],"temperature":0.3}
+    payload = {"model":"llama3-70b-8192","messages":[{"role":"user","content":prompt}],"temperature":0.2}
     try:
         r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=60)
-        if r.status_code >= 400:
-            return [{"error":f"Groq API回傳錯誤 status={r.status_code}"}]
+        if r.status_code >=400:
+            return [{"error":f"Groq API回傳錯誤 status={r.status_code}, detail:{r.text[:400]}"}]
         data = r.json()
-        raw = data["choices"][0]["message"]["content"].replace("```json","").replace("```","").strip()
+        raw = clean_json_text(data["choices"][0]["message"]["content"])
         return json.loads(raw)
     except Exception as e:
         return [{"error":f"LLM解析失敗：{str(e)}"}]
 
 
 def run_batch(industry_keyword, max_items):
-    """批量挖掘主流程"""
     if not HAS_API:
         return [{"error":"API金鑰未設定，無法執行批量挖掘"}]
     if st.session_state.df_crm is None:
         return [{"error":"請先上傳CRM CSV"}]
 
-    batch_query = f"{industry_keyword} 假貨 OR 竄貨 OR 亂價 OR 消費者投訴 OR 品牌新聞"
-    payload = {"api_key":TAVILY_API_KEY,"query":batch_query,"search_depth":"basic","max_results":12,"topic":"general"}
+    batch_query = f"{industry_keyword} 假貨 OR 竄貨 OR 亂價 OR 消費者投訴"
+    payload = {"api_key":TAVILY_API_KEY,"query":batch_query,"search_depth":"basic","max_results":8,"topic":"general"}
     try:
         resp = requests.post("https://api.tavily.com/search", json=payload, timeout=40)
         if resp.status_code >=400:
@@ -149,7 +146,6 @@ def run_batch(industry_keyword, max_items):
 
 
 def run_single_query():
-    """單筆查詢 enter觸發"""
     company = st.session_state.get("input_company","")
     st.session_state.error_msg = None
     if st.session_state.df_crm is None:
@@ -210,7 +206,7 @@ with tab_single:
             st.success("✅ 狀態：【既有目標客戶】已有目標標籤，不建議新開發")
             st.dataframe(pd.DataFrame([info_row]), use_container_width=True)
         elif status == "crm_stock_no_tag":
-            st.warning("⚠️ 狀態：【CRM有紀錄｜股票客戶，尚未有目標標籤】可納入開發候選，建議參考網路是否有潛在需求")
+            st.warning("⚠️ 狀態：【CRM有紀錄｜股票客戶，尚未有目標標籤】可納入開發候選")
             st.dataframe(pd.DataFrame([info_row]), use_container_width=True)
         elif status == "new_prospect":
             st.info("🆕 狀態：【完全不在CRM】全新潛在開發名單")
@@ -234,7 +230,6 @@ with tab_single:
                     st.markdown(f"- [{s['title']}]({s['url']})")
             except Exception as err:
                 st.error(f"網路查詢發生錯誤：{str(err)}")
-                st.caption("CRM比對功能不受影響，可以繼續使用。")
 
 # ========= 頁籤2：批量挖掘 =========
 with tab_batch:
@@ -249,7 +244,7 @@ with tab_batch:
         else:
             industry_input = selected_industry
     with col2:
-        max_output = st.number_input("最大輸出筆數", min_value=3, max_value=15, value=8)
+        max_output = st.number_input("最大輸出筆數", min_value=3, max_value=15, value=7)
 
     run_batch_btn = st.button("🚀 開始批量挖掘")
     if run_batch_btn:
@@ -314,10 +309,6 @@ with tab_batch:
 
 st.divider()
 st.caption("""
-版本V2.2｜修復Groq 404；AI初判 + 業務人工勾選
-1. 單筆查詢輸入完公司名按Enter直接執行；
-2. CRM規則：股票客戶無目標標籤保留做開發候選，有目標標籤正式客戶會被過濾；
-3. 批量挖掘：下拉選產業，AI給予A/B/C初判，**AI僅做參考，最終由業務勾選確認跟進名單**；
-4. 兩種下載模式：全部結果、僅下載業務勾選跟進名單；
-⚠️所有網路資訊僅供參考，務必人工複核；資料存放瀏覽器暫存，重整頁面會消失，記得匯出CSV保存。
+版本V2.3｜Groq容錯優化；AI初判 + 業務人工勾選
+⚠️瀏覽器暫存，重整頁面勾選狀態會消失，務必匯CSV保存
 """)
